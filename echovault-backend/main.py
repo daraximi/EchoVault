@@ -39,9 +39,10 @@ async def upload(audio: UploadFile= File(...)):
     with open(save_path, "wb") as f:
         shutil.copyfileobj(audio.file, f)
 
-    return JSONResponse({
+    return JSONResponse(content={
         "file_id": file_id,
         "filename": saved_name,
         "url": f"/uploads/{saved_name}",
         "status_code": 200
-    })
+    },
+    status_code=200)

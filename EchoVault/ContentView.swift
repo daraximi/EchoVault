@@ -15,6 +15,9 @@ struct ContentView: View {
     @State private var duration: TimeInterval = 0
     @State private var timer: Timer?
     
+    @State private var uploadMessage = ""
+    @State private var showingUploadAlert = false
+    
     var body: some View {
         NavigationView {
             ZStack {
@@ -57,7 +60,6 @@ struct ContentView: View {
                             RecordingRow(
                                 url: url,
                                 isPlaying: playingURL == url && isPlaying,
-                                // Add this line to pass the current playing URL
                                 isCurrentRow: playingURL == url,
                                 currentTime: $currentTime,
                                 duration: duration,
@@ -67,8 +69,20 @@ struct ContentView: View {
                                     newName = url.deletingPathExtension().lastPathComponent
                                     showingRename = true
                                 },
-                                onSeek: { value in
-                                    seekAudio(to: value)
+                                onSeek: { value in seekAudio(to: value) },
+                                onUpload: {
+                                    Task {
+                                        do {
+                                            let response = try await APIClient.uploadAudio(fileURL: url)
+                                            // Success! Update the UI
+                                            uploadMessage = "Successfully uploaded: \(response.filename)"
+                                            showingUploadAlert = true
+                                        } catch {
+                                            // Error! Update the UI
+                                            uploadMessage = "Upload failed: \(error.localizedDescription)"
+                                            showingUploadAlert = true
+                                        }
+                                    }
                                 }
                             )
                         }
@@ -84,6 +98,11 @@ struct ContentView: View {
                     if let url = selectedURL { recorder.renameRecording(from: url, toName: newName) }
                 }
                 Button("Cancel", role: .cancel) { }
+            }
+            .alert("Upload Status", isPresented: $showingUploadAlert) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(uploadMessage)
             }
         }
     }
@@ -131,28 +150,51 @@ struct ContentView: View {
 struct RecordingRow: View {
     let url: URL
     let isPlaying: Bool
-    let isCurrentRow: Bool // New Property
+    let isCurrentRow: Bool
     @Binding var currentTime: TimeInterval
     let duration: TimeInterval
+    
     let onPlay: () -> Void
     let onRename: () -> Void
     let onSeek: (TimeInterval) -> Void
+    let onUpload: () -> Void // New Closure
     
+    @State private var isUploading = false // Local state for UI feedback
+
     var body: some View {
         VStack(spacing: 8) {
             HStack {
                 VStack(alignment: .leading) {
                     Text(url.deletingPathExtension().lastPathComponent)
                         .font(.headline)
-                    // Show duration for this specific file
-                    // Note: This shows the duration of the ACTIVE player.
-                    // See 'Pro Tip' below for inactive files.
                     Text(isCurrentRow ? formatTime(duration) : "--:--")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
                 
+                // --- NEW UPLOAD BUTTON ---
+                Button(action: {
+                    Task {
+                        isUploading = true
+                        onUpload()
+                        // Note: In a real app, you'd want the parent to tell the row when it's done
+                        // but for a quick test, we'll reset it after a delay or success.
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        isUploading = false
+                    }
+                }) {
+                    if isUploading {
+                        ProgressView().tint(.blue)
+                    } else {
+                        Image(systemName: "icloud.and.arrow.up")
+                            .foregroundColor(.blue)
+                    }
+                }
+                .buttonStyle(BorderlessButtonStyle())
+                .padding(.horizontal, 8)
+                // -------------------------
+
                 Button(action: onRename) {
                     Image(systemName: "pencil.circle").foregroundColor(.secondary)
                 }
@@ -167,30 +209,37 @@ struct RecordingRow: View {
                 .buttonStyle(BorderlessButtonStyle())
             }
             
-            // FIX: Only show the seek bar if this is the ACTIVE row
             if isCurrentRow {
-                VStack {
-                    Slider(value: $currentTime, in: 0...duration, onEditingChanged: { editing in
-                        if !editing { onSeek(currentTime) }
-                    })
-                    .tint(.blue)
-                    
+                VStack(spacing: 6) {
+                    Slider(value: Binding(
+                        get: { currentTime },
+                        set: { newValue in
+                            currentTime = newValue
+                            onSeek(newValue)
+                        }
+                    ), in: 0...max(duration, 0.1))
                     HStack {
-                        Text(formatTime(currentTime)).font(.caption2)
+                        Text(formatTime(currentTime))
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundColor(.secondary)
                         Spacer()
-                        Text(formatTime(duration)).font(.caption2)
+                        Text(formatTime(duration))
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundColor(.secondary)
                     }
-                    .foregroundColor(.secondary)
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.vertical, 8)
     }
     
-    func formatTime(_ time: TimeInterval) -> String {
-        let minutes = Int(time) / 60
-        let seconds = Int(time) % 60
+    private func formatTime(_ time: TimeInterval) -> String {
+        guard time.isFinite && !time.isNaN else { return "--:--" }
+        let totalSeconds = max(0, Int(time.rounded()))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
     }
 }
