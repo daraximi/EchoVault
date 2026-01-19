@@ -41,7 +41,7 @@ final class APIClient {
     // MARK: - Configuration
     
     // TODO: Move this to a Config.plist or environment variable
-    static let baseURL = "http://192.168.5.145:8000"
+    static let baseURL = ConfigManager.shared.getValue(forKey: "ip_address")!
     static let timeout: TimeInterval = 60
     static let maxRetries = 2
     
