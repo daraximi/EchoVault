@@ -6,3 +6,10 @@
 //
 
 import Foundation
+
+struct RecordingMetadata: Codable{
+    let transcript: String
+    let sentimentLabel: String
+    let polarity: Double
+    var isUploaded: Bool = false
+}

@@ -3,17 +3,11 @@ import AVFoundation
 
 struct ContentView: View {
     @StateObject var recorder = AudioRecorder()
-    @State var audioPlayer: AVAudioPlayer?
-    @State private var playingURL: URL?
-    @State private var isPlaying = false
+    @StateObject var audioManager = AudioPlaybackManager()
+    
     @State private var showingRename = false
     @State private var selectedURL: URL?
     @State private var newName = ""
-    @State private var playerDelegate: PlayerDelegate?
-    
-    @State private var currentTime: TimeInterval = 0
-    @State private var duration: TimeInterval = 0
-    @State private var timer: Timer?
     
     @State private var uploadMessage = ""
     @State private var showingUploadAlert = false
@@ -25,77 +19,45 @@ struct ContentView: View {
                 
                 VStack(spacing: 25) {
                     // Visualizer / Meter
-                    HStack(spacing: 4) {
-                        ForEach(0..<10) { _ in
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(recorder.isRecording ? Color.red : Color.blue)
-                                .frame(width: 6, height: recorder.isRecording ? CGFloat.random(in: 20...80) * CGFloat(recorder.soundLevel) : 10)
-                                .animation(.easeInOut(duration: 0.1), value: recorder.soundLevel)
-                        }
-                    }
-                    .frame(height: 100)
+                    AudioVisualizerView(
+                        isRecording: recorder.isRecording,
+                        soundLevel: recorder.soundLevel
+                    )
                     
                     // Main Record Button
-                    Button(action: {
-                        recorder.isRecording ? recorder.stopRecording() : recorder.startRecording()
-                    }) {
-                        ZStack {
-                            Circle()
-                                .fill(recorder.isRecording ? Color.red.opacity(0.2) : Color.blue.opacity(0.2))
-                                .frame(width: 90, height: 90)
-                            Circle()
-                                .fill(recorder.isRecording ? Color.red : Color.blue)
-                                .frame(width: 70, height: 70)
-                            Image(systemName: recorder.isRecording ? "stop.fill" : "mic.fill")
-                                .foregroundColor(.white)
-                                .font(.system(size: 30, weight: .bold))
+                    RecordButton(
+                        isRecording: recorder.isRecording,
+                        action: {
+                            recorder.isRecording ? recorder.stopRecording() : recorder.startRecording()
                         }
-                    }
-                    .scaleEffect(recorder.isRecording ? 1.1 : 1.0)
-                    .animation(.spring(response: 0.3), value: recorder.isRecording)
+                    )
                     
                     // Recordings List
-                    List {
-                        ForEach(recorder.recordings, id: \.self) { url in
-                            RecordingRow(
-                                url: url,
-                                isPlaying: playingURL == url && isPlaying,
-                                isCurrentRow: playingURL == url,
-                                currentTime: $currentTime,
-                                duration: duration,
-                                onPlay: { togglePlayback(for: url) },
-                                onRename: {
-                                    selectedURL = url
-                                    newName = url.deletingPathExtension().lastPathComponent
-                                    showingRename = true
-                                },
-                                onSeek: { value in seekAudio(to: value) },
-                                onUpload: {
-                                    Task {
-                                        do {
-                                            let response = try await APIClient.uploadAudio(fileURL: url)
-                                            // Success! Update the UI
-                                            uploadMessage = "Successfully uploaded: \(response.filename)"
-                                            showingUploadAlert = true
-                                        } catch {
-                                            // Error! Update the UI
-                                            uploadMessage = "Upload failed: \(error.localizedDescription)"
-                                            showingUploadAlert = true
-                                        }
-                                    }
-                                }
-                            )
+                    RecordingsListView(
+                        recordings: recorder.recordings,
+                        metadataStore: recorder.metadataStore,
+                        audioManager: audioManager,
+                        onRename: { url in
+                            selectedURL = url
+                            newName = url.deletingPathExtension().lastPathComponent
+                            showingRename = true
+                        },
+                        onUpload: { url in
+                            handleUpload(for: url)
+                        },
+                        onDelete: { indexSet in
+                            recorder.deleteRecording(at: indexSet)
                         }
-                        .onDelete(perform: recorder.deleteRecording)
-                    }
-                    .listStyle(InsetGroupedListStyle())
+                    )
                 }
             }
             .navigationTitle("EchoVault")
             .alert("Rename Recording", isPresented: $showingRename) {
                 TextField("New Name", text: $newName)
                 Button("Save") {
-                    if let url = selectedURL { recorder.renameRecording(from: url, toName: newName) }
+                    if let url = selectedURL {
+                        recorder.renameRecording(from: url, toName: newName)
+                    }
                 }
                 Button("Cancel", role: .cancel) { }
             }
@@ -104,127 +66,220 @@ struct ContentView: View {
             } message: {
                 Text(uploadMessage)
             }
-        }
-    }
-    
-    
-    
-    func togglePlayback(for url: URL) {
-        if playingURL == url && isPlaying {
-            audioPlayer?.pause()
-            isPlaying = false
-            timer?.invalidate()
-        } else {
-            do {
-                audioPlayer = try AVAudioPlayer(contentsOf: url)
-                duration = audioPlayer?.duration ?? 0
-                
-                playerDelegate = PlayerDelegate {
-                    self.isPlaying = false
-                    self.timer?.invalidate()
-                    self.currentTime = 0
-                }
-                audioPlayer?.delegate = playerDelegate
-                
-                audioPlayer?.play()
-                playingURL = url
-                isPlaying = true
-                
-                // Start timer to update seek bar
-                timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-                    currentTime = audioPlayer?.currentTime ?? 0
-                }
-            } catch {
-                print("Playback failed")
+            .onDisappear {
+                audioManager.cleanup()
             }
         }
     }
     
-    func seekAudio(to value: TimeInterval) {
-        audioPlayer?.currentTime = value
-        currentTime = value
+    private func handleUpload(for url: URL) {
+        let filename = url.lastPathComponent
+        
+        Task {
+            do {
+                let response = try await APIClient.uploadAudio(fileURL: url)
+                
+                let meta = RecordingMetadata(
+                    transcript: response.transcript,
+                    sentimentLabel: response.sentiment_label,
+                    polarity: response.polarity,
+                    isUploaded: true
+                )
+                
+                await MainActor.run {
+                    recorder.saveMetadata(for: filename, metadata: meta)
+                    
+                    let shortTranscript = String(response.transcript.prefix(50))
+                    uploadMessage = "Success! Transcript: \(shortTranscript)..."
+                    showingUploadAlert = true
+                }
+            } catch {
+                await MainActor.run {
+                    uploadMessage = "Upload failed: \(error.localizedDescription)"
+                    showingUploadAlert = true
+                }
+            }
+        }
     }
 }
 
-// Custom Row Component for better UX
+// MARK: - Audio Visualizer
+struct AudioVisualizerView: View {
+    let isRecording: Bool
+    let soundLevel: Float
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<10, id: \.self) { _ in
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(isRecording ? Color.red : Color.blue)
+                    .frame(
+                        width: 6,
+                        height: isRecording
+                            ? CGFloat.random(in: 20...80) * CGFloat(soundLevel)
+                            : 10
+                    )
+                    .animation(.easeInOut(duration: 0.1), value: soundLevel)
+            }
+        }
+        .frame(height: 100)
+    }
+}
+
+// MARK: - Record Button
+struct RecordButton: View {
+    let isRecording: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(isRecording ? Color.red.opacity(0.2) : Color.blue.opacity(0.2))
+                    .frame(width: 90, height: 90)
+                Circle()
+                    .fill(isRecording ? Color.red : Color.blue)
+                    .frame(width: 70, height: 70)
+                Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+                    .foregroundColor(.white)
+                    .font(.system(size: 30, weight: .bold))
+            }
+        }
+        .scaleEffect(isRecording ? 1.1 : 1.0)
+        .animation(.spring(response: 0.3), value: isRecording)
+    }
+}
+
+// MARK: - Recordings List
+struct RecordingsListView: View {
+    let recordings: [URL]
+    let metadataStore: [String: RecordingMetadata]
+    @ObservedObject var audioManager: AudioPlaybackManager
+    
+    let onRename: (URL) -> Void
+    let onUpload: (URL) -> Void
+    let onDelete: (IndexSet) -> Void
+    
+    var body: some View {
+        List {
+            ForEach(recordings, id: \.self) { url in
+                let filename = url.lastPathComponent
+                let metadata = metadataStore[filename]
+                
+                NavigationLink(
+                    destination: RecordingDetailView(
+                        filename: filename,
+                        metadata: metadata
+                    )
+                ) {
+                    RecordingRow(
+                        url: url,
+                        metadata: metadata,
+                        audioManager: audioManager,
+                        onRename: { onRename(url) },
+                        onUpload: { onUpload(url) }
+                    )
+                }
+            }
+            .onDelete(perform: onDelete)
+        }
+        .listStyle(InsetGroupedListStyle())
+    }
+}
+
+// MARK: - Recording Row
 struct RecordingRow: View {
     let url: URL
-    let isPlaying: Bool
-    let isCurrentRow: Bool
-    @Binding var currentTime: TimeInterval
-    let duration: TimeInterval
+    let metadata: RecordingMetadata?
+    @ObservedObject var audioManager: AudioPlaybackManager
     
-    let onPlay: () -> Void
     let onRename: () -> Void
-    let onSeek: (TimeInterval) -> Void
-    let onUpload: () -> Void // New Closure
+    let onUpload: () -> Void
     
-    @State private var isUploading = false // Local state for UI feedback
-
+    @State private var isUploading = false
+    
+    private var isPlaying: Bool {
+        audioManager.currentURL == url && audioManager.isPlaying
+    }
+    
+    private var isCurrentRow: Bool {
+        audioManager.currentURL == url
+    }
+    
     var body: some View {
         VStack(spacing: 8) {
             HStack {
                 VStack(alignment: .leading) {
                     Text(url.deletingPathExtension().lastPathComponent)
                         .font(.headline)
-                    Text(isCurrentRow ? formatTime(duration) : "--:--")
+                    Text(isCurrentRow ? formatTime(audioManager.duration) : "--:--")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
                 
-                // --- NEW UPLOAD BUTTON ---
-                Button(action: {
-                    Task {
+                // Upload Button
+                if metadata?.isUploaded != true {
+                    Button(action: {
                         isUploading = true
                         onUpload()
-                        // Note: In a real app, you'd want the parent to tell the row when it's done
-                        // but for a quick test, we'll reset it after a delay or success.
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        isUploading = false
+                        // Reset after delay (upload handles actual state)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            isUploading = false
+                        }
+                    }) {
+                        if isUploading {
+                            ProgressView()
+                                .tint(.blue)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "icloud.and.arrow.up")
+                                .foregroundColor(.blue)
+                        }
                     }
-                }) {
-                    if isUploading {
-                        ProgressView().tint(.blue)
-                    } else {
-                        Image(systemName: "icloud.and.arrow.up")
-                            .foregroundColor(.blue)
-                    }
+                    .buttonStyle(BorderlessButtonStyle())
+                } else {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
                 }
-                .buttonStyle(BorderlessButtonStyle())
-                .padding(.horizontal, 8)
-                // -------------------------
-
+                
+                // Rename Button
                 Button(action: onRename) {
-                    Image(systemName: "pencil.circle").foregroundColor(.secondary)
+                    Image(systemName: "pencil.circle")
+                        .foregroundColor(.secondary)
                 }
                 .buttonStyle(BorderlessButtonStyle())
                 
-                Button(action: onPlay) {
+                // Play/Pause Button
+                Button(action: { audioManager.togglePlayback(for: url) }) {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .foregroundColor(.white)
                         .padding(10)
-                        .background(Circle().fill(isPlaying ? Color.orange : Color.blue))
+                        .background(
+                            Circle().fill(isPlaying ? Color.orange : Color.blue)
+                        )
                 }
                 .buttonStyle(BorderlessButtonStyle())
             }
             
+            // Seek Bar (only for current playing/paused recording)
             if isCurrentRow {
                 VStack(spacing: 6) {
-                    Slider(value: Binding(
-                        get: { currentTime },
-                        set: { newValue in
-                            currentTime = newValue
-                            onSeek(newValue)
-                        }
-                    ), in: 0...max(duration, 0.1))
+                    Slider(
+                        value: Binding(
+                            get: { audioManager.currentTime },
+                            set: { audioManager.seek(to: $0) }
+                        ),
+                        in: 0...max(audioManager.duration, 0.1)
+                    )
+                    
                     HStack {
-                        Text(formatTime(currentTime))
+                        Text(formatTime(audioManager.currentTime))
                             .font(.caption2)
                             .monospacedDigit()
                             .foregroundColor(.secondary)
                         Spacer()
-                        Text(formatTime(duration))
+                        Text(formatTime(audioManager.duration))
                             .font(.caption2)
                             .monospacedDigit()
                             .foregroundColor(.secondary)
@@ -243,19 +298,3 @@ struct RecordingRow: View {
         return String(format: "%02d:%02d", minutes, seconds)
     }
 }
-
-
-
-// Delegate methods
-class PlayerDelegate: NSObject, AVAudioPlayerDelegate {
-    var onFinish: () -> Void
-    
-    init(onFinish: @escaping () -> Void) {
-        self.onFinish = onFinish
-    }
-    
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        onFinish()
-    }
-}
-

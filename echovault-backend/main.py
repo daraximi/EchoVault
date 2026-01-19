@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import uuid
 import shutil
+from transcribe import transcribe_audio, analyze_sentiment
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -46,4 +47,37 @@ async def upload(audio: UploadFile= File(...)):
         "status_code": 200
     },
     status_code=200)
-    # Just for the commit
+
+
+@app.post("/upload_audio")
+async def upload_audio(audio: UploadFile= File(...)):
+    if not audio.filename:
+        return JSONResponse({
+            "error": "No filename provided",
+            status_code:400
+        })
+    file_id = str(uuid.uuid4())
+
+    ext = os.path.splitext(audio.filename)[1] or "m4a"
+    saved_name = f"{file_id}{ext}"
+    save_path = os.path.join(UPLOAD_DIR, saved_name)
+
+    with open(save_path, "wb") as buffer:
+        shutil.copyfileobj(audio.file, buffer)
+
+    #AI Step 1: Transcribe Audio
+    transcript = await transcribe_audio(save_path)
+
+    #AI Step 2: Analyze Sentiment
+    polarity, sentiment_label = analyze_sentiment(transcript)
+
+    return JSONResponse(content={
+        "file_id": file_id,
+        "filename": saved_name,
+        "url": f"/uploads/{saved_name}",
+        "transcript": transcript,
+        "polarity": polarity,
+        "sentiment_label": sentiment_label,
+        "status_code": 200
+    },
+    status_code=200)

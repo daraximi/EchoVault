@@ -4,5 +4,5 @@ __pycache__/
 uploads/
 __pycache__/*
 __pycache__
-
-
+.env
+.gitignore

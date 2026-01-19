@@ -1,113 +1,131 @@
-////
-////  APIClient.swift
-////  EchoVault
-////
-////  Created by Oluwadarasimi Oloyede on 14/01/2026.
-////
 //
-//import Foundation
+//  APIClient.swift
+//  EchoVault
 //
-//struct UploadResponse: Codable {
-//    let file_id: String
-//    let original_filename: String
-//    let saved_filename: String
-//    let local_path:String
-//}
+//  Created by Oluwadarasimi Oloyede on 14/01/2026.
 //
-//final class APIClient {
-//    static let baseURL = "http://192.168.5.141:8000"
-//
-//    static func uploadAudio(fileURL: URL) async throws -> UploadResponse{
-//        let url = URL(string: "\(baseURL)/upload")!
-//        var request = URLRequest(url: url)
-//        request.httpMethod = "POST"
-//
-//        let boundary = UUID().uuidString
-//        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-//
-//        let audioData = try Data(contentsOf: fileURL)
-//        let filename = fileURL.lastPathComponent
-//
-//        var body = Data()
-//
-//        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-//                body.append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
-//                body.append("Content-Type: audio/m4a\r\n\r\n".data(using: .utf8)!)
-//                body.append(audioData)
-//                body.append("\r\n".data(using: .utf8)!)
-//                body.append("--\(boundary)--\r\n".data(using: .utf8)!)
-//
-//        request.httpBody = body
-//        let(data, response) = try await URLSession.shared.data(for: request)
-//
-//        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-//            let msg = String(data: data, encoding: .utf8) ?? "Unknown error"
-//            throw NSError(domain:"UploadError", code:0, userInfo: [NSLocalizedDescriptionKey:msg])
-//        }
-//        return try JSONDecoder().decode(UploadResponse.self, from:data)
-//    }
-//}
 
 import Foundation
 
 struct UploadResponse: Codable {
     let file_id: String
-    let filename: String
-    let url: String
-    let status_code: Int
+    let transcript: String
+    let polarity: Double
+    let sentiment_label: String
 }
-enum APIError: Error {
+
+enum APIError: Error, LocalizedError {
     case invalidURL
     case serverError(String)
-    case decodingError
+    case decodingError(Error)
+    case networkError(Error)
+    case timeout
+    
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "Invalid server URL. Please check configuration."
+        case .serverError(let message):
+            return "Server error: \(message)"
+        case .decodingError(let error):
+            return "Failed to decode response: \(error.localizedDescription)"
+        case .networkError(let error):
+            return "Network error: \(error.localizedDescription)"
+        case .timeout:
+            return "Request timed out. Please try again."
+        }
+    }
 }
 
 final class APIClient {
-    // TIP: Use a computed property or config file for base URLs
-    static let baseURL = "http://192.168.5.141:8000"
+    // MARK: - Configuration
     
-    static func uploadAudio(fileURL: URL) async throws -> UploadResponse {
-        guard let url = URL(string: "\(baseURL)/upload") else {
+    // TODO: Move this to a Config.plist or environment variable
+    static let baseURL = "http://192.168.5.145:8000"
+    static let timeout: TimeInterval = 60
+    static let maxRetries = 2
+    
+    // MARK: - Upload Audio
+    
+    static func uploadAudio(fileURL: URL, retryCount: Int = 0) async throws -> UploadResponse {
+        guard let url = URL(string: "\(baseURL)/upload_audio") else {
             throw APIError.invalidURL
         }
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 60 // Give uploads more time
+        request.timeoutInterval = timeout
         
         let boundary = "Boundary-\(UUID().uuidString)"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         
-        // Use Data(contentsOf:) carefully; for very large files, use URLSessionUploadTask with a file
-        let audioData = try Data(contentsOf: fileURL)
-        let filename = fileURL.lastPathComponent
+        // Read audio file
+        let audioData: Data
+        do {
+            audioData = try Data(contentsOf: fileURL)
+        } catch {
+            throw APIError.networkError(error)
+        }
         
+        let filename = fileURL.lastPathComponent
         let body = createMultipartBody(
             boundary: boundary,
             data: audioData,
-            mimeType: "audio/m4a", 
+            mimeType: "audio/m4a",
             filename: filename
         )
         
-        let (data, response) = try await URLSession.shared.upload(for: request, from: body)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw APIError.serverError("Invalid Response")
-        }
-        
-        if !(200...299).contains(httpResponse.statusCode) {
-            let errorMsg = String(data: data, encoding: .utf8) ?? "Status: \(httpResponse.statusCode)"
-            throw APIError.serverError(errorMsg)
-        }
-        
+        // Perform upload
         do {
-            return try JSONDecoder().decode(UploadResponse.self, from: data)
+            let (data, response) = try await URLSession.shared.upload(for: request, from: body)
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw APIError.serverError("Invalid response type")
+            }
+            
+            // Handle HTTP errors
+            if !(200...299).contains(httpResponse.statusCode) {
+                let errorMsg = String(data: data, encoding: .utf8) ?? "Status: \(httpResponse.statusCode)"
+                
+                // Retry on server errors (5xx)
+                if (500...599).contains(httpResponse.statusCode) && retryCount < maxRetries {
+                    print("⚠️ Server error, retrying... (attempt \(retryCount + 1)/\(maxRetries))")
+                    try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(retryCount)) * 1_000_000_000))
+                    return try await uploadAudio(fileURL: fileURL, retryCount: retryCount + 1)
+                }
+                
+                throw APIError.serverError(errorMsg)
+            }
+            
+            // Decode response
+            do {
+                let decoder = JSONDecoder()
+                return try decoder.decode(UploadResponse.self, from: data)
+            } catch {
+                throw APIError.decodingError(error)
+            }
+            
+        } catch let error as APIError {
+            throw error
         } catch {
-            throw APIError.decodingError
+            // Handle network errors with retry
+            if retryCount < maxRetries {
+                print("⚠️ Network error, retrying... (attempt \(retryCount + 1)/\(maxRetries))")
+                try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(retryCount)) * 1_000_000_000))
+                return try await uploadAudio(fileURL: fileURL, retryCount: retryCount + 1)
+            }
+            throw APIError.networkError(error)
         }
     }
     
-    private static func createMultipartBody(boundary: String, data: Data, mimeType: String, filename: String) -> Data {
+    // MARK: - Helper Methods
+    
+    private static func createMultipartBody(
+        boundary: String,
+        data: Data,
+        mimeType: String,
+        filename: String
+    ) -> Data {
         var body = Data()
         let lineBreak = "\r\n"
         
@@ -122,11 +140,28 @@ final class APIClient {
     }
 }
 
-// Helper to append strings to Data easily
+// MARK: - Data Extension
+
 extension Data {
     mutating func append(_ string: String) {
         if let data = string.data(using: .utf8) {
             append(data)
         }
+    }
+}
+
+// MARK: - Configuration Helper (Optional)
+
+struct AppConfiguration {
+    static var apiBaseURL: String {
+        // Try to load from Info.plist or Config.plist
+        if let configURL = Bundle.main.url(forResource: "Config", withExtension: "plist"),
+           let config = NSDictionary(contentsOf: configURL),
+           let baseURL = config["APIBaseURL"] as? String {
+            return baseURL
+        }
+        
+        // Fallback to default
+        return "http://192.168.5.145:8000"
     }
 }
