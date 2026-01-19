@@ -1,9 +1,0 @@
-__pycache__/
-.env
-.venv/
-uploads/
-__pycache__/*
-__pycache__
-.env
-.gitignore
-config.plist
