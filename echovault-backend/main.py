@@ -1,3 +1,4 @@
+#from partd.core import filename
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,6 +6,9 @@ import os
 import uuid
 import shutil
 from transcribe import transcribe_audio, analyze_sentiment
+from DB.database import SessionLocal, Entry
+from DB.database import init_db
+init_db()
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -71,12 +75,36 @@ async def upload_audio(audio: UploadFile= File(...)):
     #AI Step 2: Analyze Sentiment
     polarity, sentiment_label = analyze_sentiment(transcript)
 
+    # return JSONResponse(content={
+    #     "file_id": file_id,
+    #     "filename": saved_name,
+    #     "url": f"/uploads/{saved_name}",
+    #     "transcript": transcript,
+    #     "polarity": polarity,
+    #     "sentiment_label": sentiment_label,
+    #     "status_code": 200
+    # },
+    # status_code=200)
+
+    db = SessionLocal()
+    entry = Entry(
+        id = file_id,
+        filename = saved_name,
+        transcript= transcript,
+        polarity = polarity,
+        sentiment_label = sentiment_label,
+    )
+    db.add(entry)
+    print("Added to DB")
+    db.commit()
+    db.close()
+
     return JSONResponse(content={
         "file_id": file_id,
         "filename": saved_name,
         "url": f"/uploads/{saved_name}",
         "transcript": transcript,
-        "polarity": polarity,
+        "polarity":round(polarity, 2),
         "sentiment_label": sentiment_label,
         "status_code": 200
     },
