@@ -9,3 +9,4 @@ __pycache__
 config.plist
 test.py
 docker-compose.yaml
+ERROR_HANDLING_FIXES.md
